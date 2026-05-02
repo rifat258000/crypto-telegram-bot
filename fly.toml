@@ -8,10 +8,6 @@ primary_region = "iad"
 [processes]
   app = "python -m bot.main"
 
-[restart]
-  policy = "always"
-  max_retries = 100
-
 [[vm]]
   size = "shared-cpu-1x"
   memory = "256mb"
