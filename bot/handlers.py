@@ -11,7 +11,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from bot import coingecko, dexscreener, charts, fmt
+from bot import coingecko, dexscreener, charts, fmt, calc, wallet
 
 log = logging.getLogger(__name__)
 
@@ -28,10 +28,13 @@ HELP_TEXT = (
     "/dex (/d) &lt;query&gt; — Search DEX pairs\n"
     "/search (/s) &lt;query&gt; — Search all tokens\n"
     "/help — Show this message\n\n"
-    "<i>Send a token name or contract address directly!</i>\n\n"
+    "<b>No command needed:</b>\n"
+    "• <code>50 btc</code> — Total price of 50 BTC\n"
+    "• <code>23+23</code> — Calculator\n"
+    "• Paste wallet address — Multi-chain balances\n"
+    "• Type any token name — Quick price\n\n"
     "<b>Works in groups!</b>\n"
-    "<i>Use /p bitcoin in any group.\n"
-    "Or mention me: @Managervaultbot bitcoin</i>"
+    "<i>Use /p bitcoin or mention @Managervaultbot</i>"
 )
 
 
@@ -367,6 +370,48 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _safe_reply(update, HELP_TEXT)
             return
 
+    # 1) Math calculator: 23+23, 100/5, etc.
+    math_result = calc.try_math(text)
+    if math_result:
+        await _safe_reply(update, math_result)
+        return
+
+    # 2) Wallet address: show multi-chain balances
+    clean = text.split()[0] if text.split() else text
+    if wallet.detect_address_type(clean):
+        await _safe_reply(update, "Looking up wallet balances...")
+        result = await wallet.get_wallet_balances(clean)
+        if result:
+            await _safe_reply(update, result)
+            return
+
+    # 3) Crypto quantity: "50 btc", "2 eth" → total price
+    parsed = calc.parse_crypto_qty(text)
+    if parsed:
+        qty, symbol = parsed
+        coins = await coingecko.search_coins(symbol)
+        if coins:
+            data = await coingecko.get_price(coins[0]["id"])
+            if data:
+                md = data.get("market_data") or {}
+                price = (md.get("current_price") or {}).get("usd")
+                if price:
+                    total = price * qty
+                    name = data.get("name", symbol.upper())
+                    sym = (data.get("symbol") or symbol).upper()
+                    logo_url = _hd_logo_url(data)
+                    msg = (
+                        f"<b>{fmt.fmt_number(qty)} {sym}</b>\n\n"
+                        f"💰 Price: <b>{fmt.fmt_price(price)}</b>\n"
+                        f"💵 Total: <b>${total:,.2f}</b>"
+                    )
+                    if logo_url:
+                        await _safe_reply_photo(update, logo_url, msg)
+                    else:
+                        await _safe_reply(update, msg)
+                    return
+
+    # 4) Default: search token by name
     ctx.args = text.split()
     await price_cmd(update, ctx)
 

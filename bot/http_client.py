@@ -44,4 +44,9 @@ async def fetch(
     log.error("All %d retries exhausted for %s", retries, url)
     if last_exc:
         raise last_exc
-    raise httpx.ReadTimeout(f"Failed after {retries} retries: {url}")
+    log.error("All %d retries exhausted for %s (rate limited)", retries, url)
+    raise httpx.HTTPStatusError(
+        f"Rate limited after {retries} retries: {url}",
+        request=httpx.Request("GET", url),
+        response=httpx.Response(429),
+    )
