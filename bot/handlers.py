@@ -1,0 +1,407 @@
+"""Telegram bot command & callback handlers."""
+
+from __future__ import annotations
+
+import io
+import logging
+import traceback
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
+
+from bot import coingecko, dexscreener, charts, fmt
+
+log = logging.getLogger(__name__)
+
+# ── helpers ──────────────────────────────────────────────────────────────
+
+HELP_TEXT = (
+    "<b>Crypto Market Bot</b>\n\n"
+    "<b>Commands:</b>\n"
+    "/price &lt;token&gt; — Live price (CEX + DEX)\n"
+    "/chart &lt;token&gt; [1|7|30|90|365] — Price chart\n"
+    "/info &lt;token&gt; — Detailed token info\n"
+    "/trending — Trending tokens\n"
+    "/top — Top 20 coins by market cap\n"
+    "/dex &lt;query&gt; — Search DEX pairs\n"
+    "/search &lt;query&gt; — Search all tokens\n"
+    "/help — Show this message\n\n"
+    "<i>You can also just send a token name or contract address directly!</i>"
+)
+
+
+async def _safe_reply(update: Update, text: str, **kw):
+    msg = update.message or (update.callback_query and update.callback_query.message)
+    if msg:
+        await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
+
+
+# ── /start & /help ──────────────────────────────────────────────────────
+
+async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _safe_reply(update, HELP_TEXT)
+
+
+# ── /price ──────────────────────────────────────────────────────────────
+
+async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await _safe_reply(update, "Usage: /price &lt;token&gt;\nExample: /price bitcoin")
+        return
+    query = " ".join(ctx.args)
+    await _safe_reply(update, f"Looking up <b>{query}</b>...")
+
+    # Try CoinGecko first
+    coins = await coingecko.search_coins(query)
+    if coins:
+        coin_id = coins[0]["id"]
+        data = await coingecko.get_price(coin_id)
+        if data:
+            kb = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("📈 Chart 7d", callback_data=f"chart:{coin_id}:7"),
+                    InlineKeyboardButton("📊 Chart 30d", callback_data=f"chart:{coin_id}:30"),
+                ],
+                [
+                    InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
+                    InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
+                ],
+            ])
+            await _safe_reply(update, fmt.cex_price_message(data), reply_markup=kb)
+            return
+
+    # Fallback: try DexScreener
+    pairs = await dexscreener.search_pairs(query)
+    if pairs:
+        pair = pairs[0]
+        kb = _dex_pair_keyboard(pairs)
+        await _safe_reply(update, fmt.dex_pair_message(pair), reply_markup=kb)
+        return
+
+    await _safe_reply(update, f"No results found for <b>{query}</b>.")
+
+
+# ── /chart ──────────────────────────────────────────────────────────────
+
+async def chart_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await _safe_reply(update, "Usage: /chart &lt;token&gt; [days]\nExample: /chart bitcoin 30")
+        return
+    days = 7
+    if ctx.args[-1].isdigit():
+        days = int(ctx.args[-1])
+        query = " ".join(ctx.args[:-1])
+    else:
+        query = " ".join(ctx.args)
+
+    if not query:
+        await _safe_reply(update, "Please provide a token name.")
+        return
+
+    await _safe_reply(update, f"Generating chart for <b>{query}</b> ({days}d)...")
+    coins = await coingecko.search_coins(query)
+    if not coins:
+        await _safe_reply(update, f"Token <b>{query}</b> not found.")
+        return
+
+    coin_id = coins[0]["id"]
+    chart_data = await coingecko.get_market_chart(coin_id, days)
+    if not chart_data or not chart_data.get("prices"):
+        await _safe_reply(update, "Could not fetch chart data.")
+        return
+
+    name = coins[0].get("name", query)
+    symbol = coins[0].get("symbol", "").upper()
+    img = charts.generate_price_chart(
+        chart_data["prices"],
+        title=f"{name} ({symbol}) — {days}d",
+        days=days,
+    )
+
+    kb = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("1d", callback_data=f"chart:{coin_id}:1"),
+            InlineKeyboardButton("7d", callback_data=f"chart:{coin_id}:7"),
+            InlineKeyboardButton("30d", callback_data=f"chart:{coin_id}:30"),
+            InlineKeyboardButton("90d", callback_data=f"chart:{coin_id}:90"),
+            InlineKeyboardButton("1y", callback_data=f"chart:{coin_id}:365"),
+        ],
+        [InlineKeyboardButton("💰 Price", callback_data=f"price_cb:{coin_id}")],
+    ])
+    msg = update.message or update.callback_query.message
+    await msg.reply_photo(photo=io.BytesIO(img), caption=f"{name} ({symbol}) — {days}d chart", reply_markup=kb)
+
+
+# ── /info ───────────────────────────────────────────────────────────────
+
+async def info_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await _safe_reply(update, "Usage: /info &lt;token&gt;\nExample: /info ethereum")
+        return
+    query = " ".join(ctx.args)
+    await _safe_reply(update, f"Fetching info for <b>{query}</b>...")
+
+    coins = await coingecko.search_coins(query)
+    if coins:
+        data = await coingecko.get_price(coins[0]["id"])
+        if data:
+            desc = (data.get("description", {}).get("en") or "")[:500]
+            links = data.get("links", {})
+            homepage = (links.get("homepage") or [""])[0]
+            text = fmt.cex_price_message(data)
+            if desc:
+                # strip HTML tags from CoinGecko description
+                import re
+                desc_clean = re.sub(r"<[^>]+>", "", desc)
+                text += f"\n\n<b>About:</b> {desc_clean}..."
+            if homepage:
+                text += f'\n<b>Website:</b> <a href="{homepage}">{homepage}</a>'
+            await _safe_reply(update, text)
+            return
+
+    pairs = await dexscreener.search_pairs(query)
+    if pairs:
+        await _safe_reply(update, fmt.dex_pair_message(pairs[0]))
+        return
+
+    await _safe_reply(update, f"No info found for <b>{query}</b>.")
+
+
+# ── /trending ───────────────────────────────────────────────────────────
+
+async def trending_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _safe_reply(update, "Fetching trending tokens...")
+    coins = await coingecko.get_trending()
+    if not coins:
+        await _safe_reply(update, "Could not fetch trending tokens.")
+        return
+
+    lines = ["<b>🔥 Trending on CoinGecko</b>\n"]
+    for i, c in enumerate(coins, 1):
+        item = c.get("item", {})
+        name = item.get("name", "?")
+        symbol = item.get("symbol", "?")
+        rank = item.get("market_cap_rank") or "—"
+        coin_id = item.get("id", "")
+        price_btc = item.get("price_btc")
+        price_str = f" | {price_btc:.8f} BTC" if price_btc else ""
+        lines.append(f"{i}. <b>{name}</b> ({symbol}) #{rank}{price_str}")
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔥 DEX Trending", callback_data="dex_trending"),
+    ]])
+    await _safe_reply(update, "\n".join(lines), reply_markup=kb)
+
+
+# ── /top ────────────────────────────────────────────────────────────────
+
+async def top_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await _safe_reply(update, "Fetching top coins...")
+    coins = await coingecko.get_top_coins(20)
+    if not coins:
+        await _safe_reply(update, "Could not fetch top coins.")
+        return
+
+    lines = ["<b>🏆 Top 20 by Market Cap</b>\n"]
+    for i, c in enumerate(coins, 1):
+        symbol = c.get("symbol", "?").upper()
+        price = c.get("current_price")
+        change = c.get("price_change_percentage_24h")
+        mc = c.get("market_cap")
+        lines.append(
+            f"{i}. <b>{symbol}</b> {fmt.fmt_price(price)} "
+            f"{fmt.fmt_pct(change)} | MC: {fmt.fmt_number(mc)}"
+        )
+    await _safe_reply(update, "\n".join(lines))
+
+
+# ── /dex ────────────────────────────────────────────────────────────────
+
+async def dex_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await _safe_reply(update, "Usage: /dex &lt;token or address&gt;\nExample: /dex PEPE")
+        return
+    query = " ".join(ctx.args)
+    await _safe_reply(update, f"Searching DEX pairs for <b>{query}</b>...")
+
+    # If it looks like a contract address, use token endpoint
+    if len(query) > 30 and not " " in query:
+        pairs = await dexscreener.get_token_pairs(query)
+    else:
+        pairs = await dexscreener.search_pairs(query)
+
+    if not pairs:
+        await _safe_reply(update, f"No DEX pairs found for <b>{query}</b>.")
+        return
+
+    pair = pairs[0]
+    kb = _dex_pair_keyboard(pairs)
+    await _safe_reply(update, fmt.dex_pair_message(pair), reply_markup=kb)
+
+
+# ── /search ─────────────────────────────────────────────────────────────
+
+async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ctx.args:
+        await _safe_reply(update, "Usage: /search &lt;query&gt;")
+        return
+    query = " ".join(ctx.args)
+    await _safe_reply(update, f"Searching for <b>{query}</b> across CEX & DEX...")
+
+    cex_coins = await coingecko.search_coins(query)
+    dex_pairs = await dexscreener.search_pairs(query)
+
+    lines = []
+    if cex_coins:
+        lines.append("<b>CEX Results (CoinGecko):</b>")
+        for c in cex_coins[:5]:
+            name = c.get("name", "?")
+            symbol = c.get("symbol", "?").upper()
+            rank = c.get("market_cap_rank")
+            rank_str = f" #{rank}" if rank else ""
+            lines.append(f"• <b>{name}</b> ({symbol}){rank_str}")
+        lines.append("")
+
+    if dex_pairs:
+        lines.append("<b>DEX Results (DexScreener):</b>")
+        for p in dex_pairs[:5]:
+            base = p.get("baseToken", {})
+            name = base.get("name", "?")
+            symbol = base.get("symbol", "?")
+            chain = p.get("chainId", "?")
+            price = p.get("priceUsd")
+            price_str = f" — {fmt.fmt_price(float(price))}" if price else ""
+            lines.append(f"• <b>{name}</b> ({symbol}) [{chain}]{price_str}")
+
+    if not lines:
+        await _safe_reply(update, f"No results for <b>{query}</b>.")
+        return
+
+    buttons = []
+    if cex_coins:
+        cid = cex_coins[0]["id"]
+        buttons.append([
+            InlineKeyboardButton("💰 Price", callback_data=f"price_cb:{cid}"),
+            InlineKeyboardButton("📈 Chart", callback_data=f"chart:{cid}:7"),
+        ])
+    if dex_pairs:
+        buttons.append([InlineKeyboardButton("🔍 DEX Details", callback_data=f"dex_search:{query}")])
+
+    kb = InlineKeyboardMarkup(buttons) if buttons else None
+    await _safe_reply(update, "\n".join(lines), reply_markup=kb)
+
+
+# ── plain text handler (search by name or address) ──────────────────────
+
+async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = (update.message.text or "").strip()
+    if not text or text.startswith("/"):
+        return
+    ctx.args = text.split()
+    await price_cmd(update, ctx)
+
+
+# ── callback query handler ──────────────────────────────────────────────
+
+async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    data = q.data or ""
+
+    try:
+        if data.startswith("price_cb:"):
+            coin_id = data.split(":", 1)[1]
+            d = await coingecko.get_price(coin_id)
+            if d:
+                await q.message.reply_text(fmt.cex_price_message(d), parse_mode=ParseMode.HTML)
+            else:
+                await q.message.reply_text("Could not fetch price.")
+
+        elif data.startswith("chart:"):
+            parts = data.split(":")
+            coin_id = parts[1]
+            days = int(parts[2]) if len(parts) > 2 else 7
+            chart_data = await coingecko.get_market_chart(coin_id, days)
+            if chart_data and chart_data.get("prices"):
+                img = charts.generate_price_chart(chart_data["prices"], title=f"{coin_id} — {days}d", days=days)
+                kb = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("1d", callback_data=f"chart:{coin_id}:1"),
+                        InlineKeyboardButton("7d", callback_data=f"chart:{coin_id}:7"),
+                        InlineKeyboardButton("30d", callback_data=f"chart:{coin_id}:30"),
+                        InlineKeyboardButton("90d", callback_data=f"chart:{coin_id}:90"),
+                        InlineKeyboardButton("1y", callback_data=f"chart:{coin_id}:365"),
+                    ],
+                    [InlineKeyboardButton("💰 Price", callback_data=f"price_cb:{coin_id}")],
+                ])
+                await q.message.reply_photo(photo=io.BytesIO(img), caption=f"{coin_id} — {days}d chart", reply_markup=kb)
+            else:
+                await q.message.reply_text("Could not fetch chart data.")
+
+        elif data.startswith("info:"):
+            coin_id = data.split(":", 1)[1]
+            d = await coingecko.get_price(coin_id)
+            if d:
+                await q.message.reply_text(fmt.cex_price_message(d), parse_mode=ParseMode.HTML)
+
+        elif data.startswith("dex_search:"):
+            query = data.split(":", 1)[1]
+            pairs = await dexscreener.search_pairs(query)
+            if pairs:
+                kb = _dex_pair_keyboard(pairs)
+                await q.message.reply_text(fmt.dex_pair_message(pairs[0]), parse_mode=ParseMode.HTML, reply_markup=kb)
+            else:
+                await q.message.reply_text("No DEX pairs found.")
+
+        elif data.startswith("dex_pair:"):
+            parts = data.split(":", 2)
+            chain, addr = parts[1], parts[2]
+            pair = await dexscreener.get_pair_by_address(chain, addr)
+            if pair:
+                await q.message.reply_text(fmt.dex_pair_message(pair), parse_mode=ParseMode.HTML)
+            else:
+                await q.message.reply_text("Pair not found.")
+
+        elif data == "dex_trending":
+            pairs = await dexscreener.get_trending_dex()
+            if not pairs:
+                await q.message.reply_text("Could not fetch DEX trending.")
+                return
+            lines = ["<b>🔥 DEX Boosted Tokens</b>\n"]
+            for i, t in enumerate(pairs[:10], 1):
+                name = t.get("description") or t.get("tokenAddress", "?")[:12]
+                chain = t.get("chainId", "?")
+                url = t.get("url", "")
+                link = f' <a href="{url}">view</a>' if url else ""
+                lines.append(f"{i}. <b>{name}</b> [{chain}]{link}")
+            await q.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    except Exception:
+        log.error("callback error: %s", traceback.format_exc())
+        await q.message.reply_text("Something went wrong. Please try again.")
+
+
+# ── error handler ───────────────────────────────────────────────────────
+
+async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
+    log.error("Unhandled exception: %s", ctx.error, exc_info=ctx.error)
+
+
+# ── keyboard helpers ────────────────────────────────────────────────────
+
+def _dex_pair_keyboard(pairs: list[dict]) -> InlineKeyboardMarkup | None:
+    buttons = []
+    for p in pairs[1:5]:
+        base = p.get("baseToken", {})
+        symbol = base.get("symbol", "?")
+        chain = p.get("chainId", "?")
+        addr = p.get("pairAddress", "")
+        if addr:
+            buttons.append(InlineKeyboardButton(
+                f"{symbol} ({chain})", callback_data=f"dex_pair:{chain}:{addr}"[:64]
+            ))
+    if not buttons:
+        return None
+    rows = [buttons[i:i+2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(rows)
