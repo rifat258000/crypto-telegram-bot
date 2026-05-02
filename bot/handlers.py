@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import traceback
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -19,17 +20,17 @@ log = logging.getLogger(__name__)
 HELP_TEXT = (
     "<b>Crypto Market Bot</b>\n\n"
     "<b>Commands:</b>\n"
-    "/price &lt;token&gt; — Live price (CEX + DEX)\n"
-    "/chart &lt;token&gt; [1|7|30|90|365] — Price chart\n"
-    "/info &lt;token&gt; — Detailed token info\n"
-    "/trending — Trending tokens\n"
+    "/price (/p) &lt;token&gt; — Live price (CEX + DEX)\n"
+    "/chart (/c) &lt;token&gt; [1|7|30|90|365] — Price chart\n"
+    "/info (/i) &lt;token&gt; — Detailed token info\n"
+    "/trending (/t) — Trending tokens\n"
     "/top — Top 20 coins by market cap\n"
-    "/dex &lt;query&gt; — Search DEX pairs\n"
-    "/search &lt;query&gt; — Search all tokens\n"
+    "/dex (/d) &lt;query&gt; — Search DEX pairs\n"
+    "/search (/s) &lt;query&gt; — Search all tokens\n"
     "/help — Show this message\n\n"
     "<i>Send a token name or contract address directly!</i>\n\n"
     "<b>Works in groups!</b>\n"
-    "<i>Use /price bitcoin in any group.\n"
+    "<i>Use /p bitcoin in any group.\n"
     "Or mention me: @Managervaultbot bitcoin</i>"
 )
 
@@ -315,7 +316,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         mention = f"@{BOT_USERNAME}"
         if mention.lower() not in text.lower():
             return
-        text = text.replace(mention, "").replace(mention.lower(), "").strip()
+        text = re.sub(re.escape(mention), "", text, flags=re.IGNORECASE).strip()
         if not text:
             await _safe_reply(update, HELP_TEXT)
             return
