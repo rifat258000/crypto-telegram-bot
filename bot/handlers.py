@@ -386,6 +386,13 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled exception: %s", ctx.error, exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        try:
+            await update.effective_message.reply_text(
+                "Temporary error — please try again in a moment."
+            )
+        except Exception:
+            pass
 
 
 # ── keyboard helpers ────────────────────────────────────────────────────
