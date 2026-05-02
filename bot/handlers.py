@@ -27,7 +27,10 @@ HELP_TEXT = (
     "/dex &lt;query&gt; — Search DEX pairs\n"
     "/search &lt;query&gt; — Search all tokens\n"
     "/help — Show this message\n\n"
-    "<i>You can also just send a token name or contract address directly!</i>"
+    "<i>Send a token name or contract address directly!</i>\n\n"
+    "<b>Works in groups!</b>\n"
+    "<i>Use /price bitcoin in any group.\n"
+    "Or mention me: @Managervaultbot bitcoin</i>"
 )
 
 
@@ -294,10 +297,29 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── plain text handler (search by name or address) ──────────────────────
 
+BOT_USERNAME: str | None = None
+
+
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BOT_USERNAME
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
         return
+
+    # In group chats, only respond if the bot is mentioned
+    chat_type = update.effective_chat.type if update.effective_chat else "private"
+    if chat_type in ("group", "supergroup"):
+        if BOT_USERNAME is None:
+            bot_info = await ctx.bot.get_me()
+            BOT_USERNAME = bot_info.username or ""
+        mention = f"@{BOT_USERNAME}"
+        if mention.lower() not in text.lower():
+            return
+        text = text.replace(mention, "").replace(mention.lower(), "").strip()
+        if not text:
+            await _safe_reply(update, HELP_TEXT)
+            return
+
     ctx.args = text.split()
     await price_cmd(update, ctx)
 
