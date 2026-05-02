@@ -41,6 +41,22 @@ async def _safe_reply(update: Update, text: str, **kw):
         await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
 
 
+async def _safe_reply_photo(update: Update, photo_url: str, caption: str, **kw):
+    """Send a photo with caption. Falls back to text if photo fails."""
+    msg = update.message or (update.callback_query and update.callback_query.message)
+    if not msg:
+        return
+    try:
+        await msg.reply_photo(
+            photo=photo_url,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            **kw,
+        )
+    except Exception:
+        await msg.reply_text(caption, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
+
+
 # ── /start & /help ──────────────────────────────────────────────────────
 
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -72,7 +88,12 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
                 ],
             ])
-            await _safe_reply(update, fmt.cex_price_message(data), reply_markup=kb)
+            logo_url = (data.get("image") or {}).get("large") or ""
+            caption = fmt.cex_price_message(data)
+            if logo_url:
+                await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
+            else:
+                await _safe_reply(update, caption, reply_markup=kb)
             return
 
     # Fallback: try DexScreener
@@ -80,7 +101,12 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if pairs:
         pair = pairs[0]
         kb = _dex_pair_keyboard(pairs)
-        await _safe_reply(update, fmt.dex_pair_message(pair), reply_markup=kb)
+        logo_url = (pair.get("info") or {}).get("imageUrl") or ""
+        caption = fmt.dex_pair_message(pair)
+        if logo_url:
+            await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
+        else:
+            await _safe_reply(update, caption, reply_markup=kb)
         return
 
     await _safe_reply(update, f"No results found for <b>{query}</b>.")
@@ -337,7 +363,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             coin_id = data.split(":", 1)[1]
             d = await coingecko.get_price(coin_id)
             if d:
-                await q.message.reply_text(fmt.cex_price_message(d), parse_mode=ParseMode.HTML)
+                logo_url = (d.get("image") or {}).get("large") or ""
+                caption = fmt.cex_price_message(d)
+                if logo_url:
+                    try:
+                        await q.message.reply_photo(
+                            photo=logo_url, caption=caption, parse_mode=ParseMode.HTML
+                        )
+                    except Exception:
+                        await q.message.reply_text(caption, parse_mode=ParseMode.HTML)
+                else:
+                    await q.message.reply_text(caption, parse_mode=ParseMode.HTML)
             else:
                 await q.message.reply_text("Could not fetch price.")
 
