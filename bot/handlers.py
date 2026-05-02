@@ -41,6 +41,26 @@ async def _safe_reply(update: Update, text: str, **kw):
         await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
 
 
+def _hd_logo_url(data: dict) -> str:
+    """Extract the highest resolution logo URL available."""
+    images = data.get("image") or {}
+    large_url = images.get("large") or ""
+    if large_url:
+        return large_url.replace("/large/", "/original/")
+    return ""
+
+
+def _dex_hd_logo_url(pair: dict) -> str:
+    """Extract HD logo URL from DexScreener pair data."""
+    info = pair.get("info") or {}
+    url = info.get("imageUrl") or ""
+    if url and "width=" in url:
+        # Remove size constraints for full resolution
+        base = url.split("?")[0]
+        return base
+    return url
+
+
 async def _safe_reply_photo(update: Update, photo_url: str, caption: str, **kw):
     """Send a photo with caption. Falls back to text if photo fails."""
     msg = update.message or (update.callback_query and update.callback_query.message)
@@ -88,7 +108,7 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
                 ],
             ])
-            logo_url = (data.get("image") or {}).get("large") or ""
+            logo_url = _hd_logo_url(data)
             caption = fmt.cex_price_message(data)
             if logo_url:
                 await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
@@ -101,7 +121,7 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if pairs:
         pair = pairs[0]
         kb = _dex_pair_keyboard(pairs)
-        logo_url = (pair.get("info") or {}).get("imageUrl") or ""
+        logo_url = _dex_hd_logo_url(pair)
         caption = fmt.dex_pair_message(pair)
         if logo_url:
             await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
@@ -363,7 +383,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             coin_id = data.split(":", 1)[1]
             d = await coingecko.get_price(coin_id)
             if d:
-                logo_url = (d.get("image") or {}).get("large") or ""
+                logo_url = _hd_logo_url(d)
                 caption = fmt.cex_price_message(d)
                 if logo_url:
                     try:
