@@ -1,0 +1,14 @@
+app = "crypto-tg-bot-rifat"
+primary_region = "iad"
+
+[build]
+
+[env]
+
+[processes]
+  app = "python -m bot.main"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+  cpus = 1
