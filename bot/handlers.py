@@ -34,8 +34,8 @@ HELP_TEXT = (
     "• Paste wallet address — Multi-chain balances\n"
     "• Type any token name — Quick price\n\n"
     "<b>Works in groups!</b>\n"
-    "<i>Make me admin → I reply to everything.\n"
-    "Not admin → use /commands or @mention me.</i>"
+    "<i>@mention me for price/token lookup.\n"
+    "Calculator &amp; crypto qty work without mention (if admin).</i>"
 )
 
 
@@ -424,8 +424,8 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or text.startswith("/"):
         return
 
-    # In group chats: if @mentioned, treat like private chat (full search).
-    # If bot is admin and NOT mentioned, only respond to clear crypto patterns.
+    # In group chats: @mention required for price/token lookup.
+    # Math calc & crypto qty work without mention (if bot is admin).
     chat_type = update.effective_chat.type if update.effective_chat else "private"
     is_group = chat_type in ("group", "supergroup")
     mentioned = False
@@ -435,7 +435,6 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             BOT_USERNAME = bot_info.username or ""
         mention = f"@{BOT_USERNAME}"
         has_mention = mention.lower() in text.lower()
-        is_admin = await _bot_is_admin(update.effective_chat.id, ctx)
 
         if has_mention:
             mentioned = True
@@ -443,25 +442,19 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not text:
                 await _safe_reply(update, HELP_TEXT)
                 return
-        elif not is_admin:
-            return
+        else:
+            # Not mentioned — only allow math/crypto-qty if bot is admin
+            is_admin = await _bot_is_admin(update.effective_chat.id, ctx)
+            if not is_admin:
+                return
 
-    # 1) Math calculator: 23+23, 100/5, etc.
+    # 1) Math calculator: 23+23, 100/5, etc. (works without mention in groups)
     math_result = calc.try_math(text)
     if math_result:
         await _safe_reply(update, math_result)
         return
 
-    # 2) Wallet address: show multi-chain balances
-    clean = text.split()[0] if text.split() else text
-    if wallet.detect_address_type(clean):
-        await _safe_reply(update, "Looking up wallet balances...")
-        result = await wallet.get_wallet_balances(clean)
-        if result:
-            await _safe_reply(update, result)
-            return
-
-    # 3) Crypto quantity: "50 btc", "2 eth" → total price
+    # 2) Crypto quantity: "50 btc", "2 eth" (works without mention in groups)
     parsed = calc.parse_crypto_qty(text)
     if parsed:
         qty, symbol = parsed
@@ -489,24 +482,22 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         await _safe_reply(update, msg)
                     return
 
-    # 4) Default: search token by name
-    # In groups (without @mention), only respond if text looks like a token query
-    # (single word, 2-20 chars) to avoid replying to random conversations
+    # In groups without @mention, stop here — no token/wallet/price lookup
     if is_group and not mentioned:
-        words = text.split()
-        if len(words) != 1 or len(words[0]) < 2 or len(words[0]) > 20:
+        return
+
+    # 3) Wallet address: show multi-chain balances (requires @mention in groups)
+    clean = text.split()[0] if text.split() else text
+    if wallet.detect_address_type(clean):
+        await _safe_reply(update, "Looking up wallet balances...")
+        result = await wallet.get_wallet_balances(clean)
+        if result:
+            await _safe_reply(update, result)
             return
-        coins = await coingecko.search_coins(text)
-        if not coins:
-            return
-        best = _best_coin(coins, text)
-        if not best:
-            return
-        ctx.args = text.split()
-        await price_cmd(update, ctx)
-    else:
-        ctx.args = text.split()
-        await price_cmd(update, ctx)
+
+    # 4) Default: search token by name (requires @mention in groups)
+    ctx.args = text.split()
+    await price_cmd(update, ctx)
 
 
 # ── callback query handler ──────────────────────────────────────────────
