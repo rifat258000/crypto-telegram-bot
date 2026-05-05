@@ -424,9 +424,12 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or text.startswith("/"):
         return
 
-    # In group chats: respond freely if bot is admin, otherwise require @mention
+    # In group chats: if @mentioned, treat like private chat (full search).
+    # If bot is admin and NOT mentioned, only respond to clear crypto patterns.
     chat_type = update.effective_chat.type if update.effective_chat else "private"
-    if chat_type in ("group", "supergroup"):
+    is_group = chat_type in ("group", "supergroup")
+    mentioned = False
+    if is_group:
         if BOT_USERNAME is None:
             bot_info = await ctx.bot.get_me()
             BOT_USERNAME = bot_info.username or ""
@@ -435,6 +438,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         is_admin = await _bot_is_admin(update.effective_chat.id, ctx)
 
         if has_mention:
+            mentioned = True
             text = re.sub(re.escape(mention), "", text, flags=re.IGNORECASE).strip()
             if not text:
                 await _safe_reply(update, HELP_TEXT)
@@ -486,8 +490,23 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     return
 
     # 4) Default: search token by name
-    ctx.args = text.split()
-    await price_cmd(update, ctx)
+    # In groups (without @mention), only respond if text looks like a token query
+    # (single word, 2-20 chars) to avoid replying to random conversations
+    if is_group and not mentioned:
+        words = text.split()
+        if len(words) != 1 or len(words[0]) < 2 or len(words[0]) > 20:
+            return
+        coins = await coingecko.search_coins(text)
+        if not coins:
+            return
+        best = _best_coin(coins, text)
+        if not best:
+            return
+        ctx.args = text.split()
+        await price_cmd(update, ctx)
+    else:
+        ctx.args = text.split()
+        await price_cmd(update, ctx)
 
 
 # ── callback query handler ──────────────────────────────────────────────
