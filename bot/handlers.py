@@ -445,7 +445,9 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         qty, symbol = parsed
         coins = await coingecko.search_coins(symbol)
         if coins:
-            data = await coingecko.get_price(coins[0]["id"])
+            best = _best_coin(coins, symbol)
+            coin_id = best["id"] if best else coins[0]["id"]
+            data = await coingecko.get_price(coin_id)
             if data:
                 md = data.get("market_data") or {}
                 price = (md.get("current_price") or {}).get("usd")
