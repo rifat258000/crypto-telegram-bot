@@ -34,7 +34,8 @@ HELP_TEXT = (
     "• Paste wallet address — Multi-chain balances\n"
     "• Type any token name — Quick price\n\n"
     "<b>Works in groups!</b>\n"
-    "<i>Use /p bitcoin or mention @Managervaultbot</i>"
+    "<i>Make me admin → I reply to everything.\n"
+    "Not admin → use /commands or @mention me.</i>"
 )
 
 
@@ -402,6 +403,19 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ── plain text handler (search by name or address) ──────────────────────
 
 BOT_USERNAME: str | None = None
+BOT_ID: int | None = None
+
+
+async def _bot_is_admin(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    global BOT_ID
+    try:
+        if BOT_ID is None:
+            bot_info = await ctx.bot.get_me()
+            BOT_ID = bot_info.id
+        member = await ctx.bot.get_chat_member(chat_id, BOT_ID)
+        return member.status in ("administrator", "creator")
+    except Exception:
+        return False
 
 
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -410,18 +424,22 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text or text.startswith("/"):
         return
 
-    # In group chats, only respond if the bot is mentioned
+    # In group chats: respond freely if bot is admin, otherwise require @mention
     chat_type = update.effective_chat.type if update.effective_chat else "private"
     if chat_type in ("group", "supergroup"):
         if BOT_USERNAME is None:
             bot_info = await ctx.bot.get_me()
             BOT_USERNAME = bot_info.username or ""
         mention = f"@{BOT_USERNAME}"
-        if mention.lower() not in text.lower():
-            return
-        text = re.sub(re.escape(mention), "", text, flags=re.IGNORECASE).strip()
-        if not text:
-            await _safe_reply(update, HELP_TEXT)
+        has_mention = mention.lower() in text.lower()
+        is_admin = await _bot_is_admin(update.effective_chat.id, ctx)
+
+        if has_mention:
+            text = re.sub(re.escape(mention), "", text, flags=re.IGNORECASE).strip()
+            if not text:
+                await _safe_reply(update, HELP_TEXT)
+                return
+        elif not is_admin:
             return
 
     # 1) Math calculator: 23+23, 100/5, etc.
