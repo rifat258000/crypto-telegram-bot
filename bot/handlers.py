@@ -457,7 +457,7 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     sym = (data.get("symbol") or symbol).upper()
                     logo_url = _hd_logo_url(data)
                     msg = (
-                        f"<b>{fmt.fmt_number(qty)} {sym}</b>\n\n"
+                        f"<b>{qty:,.6g} {sym}</b>\n\n"
                         f"💰 Price: <b>{fmt.fmt_price(price)}</b>\n"
                         f"💵 Total: <b>${total:,.2f}</b>"
                     )
