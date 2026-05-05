@@ -471,10 +471,13 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     name = data.get("name", symbol.upper())
                     sym = (data.get("symbol") or symbol).upper()
                     logo_url = _hd_logo_url(data)
+                    bdt_rate = 125
+                    total_bdt = total * bdt_rate
                     msg = (
                         f"<b>{qty:,.6g} {sym}</b>\n\n"
                         f"💰 Price: <b>{fmt.fmt_price(price)}</b>\n"
-                        f"💵 Total: <b>${total:,.2f}</b>"
+                        f"💵 Total: <b>${total:,.2f}</b>\n"
+                        f"🇧🇩 BDT: <b>৳{total_bdt:,.2f}</b>"
                     )
                     if logo_url:
                         await _safe_reply_photo(update, logo_url, msg)
