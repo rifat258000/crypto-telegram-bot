@@ -333,8 +333,10 @@ def is_solana_address(text: str) -> bool:
 
 
 def is_btc_address(text: str) -> bool:
-    if text.startswith(("1", "3", "bc1")) and 25 <= len(text) <= 62:
-        valid = string.ascii_letters + string.digits
+    valid = string.ascii_letters + string.digits
+    if text.startswith("bc1") and 42 <= len(text) <= 62:
+        return all(c in valid for c in text)
+    if text.startswith(("1", "3")) and 25 <= len(text) <= 34:
         return all(c in valid for c in text)
     return False
 

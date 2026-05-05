@@ -17,7 +17,7 @@ SAFE_OPS = {
 }
 
 MATH_PATTERN = re.compile(
-    r"^[\d\s\+\-\*\/\.\(\)\%\^]+={0,1}$"
+    r"^[\d\s\+\-\*\/\.\(\)\%\^]*[\+\-\*\/\%\^][\d\s\+\-\*\/\.\(\)\%\^]*={0,1}$"
 )
 
 CRYPTO_QTY_PATTERN = re.compile(
