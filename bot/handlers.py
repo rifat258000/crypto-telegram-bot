@@ -115,7 +115,7 @@ async def _show_price(update: Update, coin_id: str, query: str):
             ],
             [
                 InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
-                InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
+                InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query[:53]}"),
             ],
         ])
         logo_url = _hd_logo_url(data)
@@ -393,7 +393,7 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📈 Chart", callback_data=f"chart:{cid}:7"),
         ])
     if dex_pairs:
-        buttons.append([InlineKeyboardButton("🔍 DEX Details", callback_data=f"dex_search:{query}")])
+        buttons.append([InlineKeyboardButton("🔍 DEX Details", callback_data=f"dex_search:{query[:53]}")])
 
     kb = InlineKeyboardMarkup(buttons) if buttons else None
     await _safe_reply(update, "\n".join(lines), reply_markup=kb)
