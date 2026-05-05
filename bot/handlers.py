@@ -88,6 +88,46 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── /price ──────────────────────────────────────────────────────────────
 
+
+def _best_coin(coins: list[dict], query: str) -> dict | None:
+    q = query.lower().strip()
+    # Exact name match is strongest (e.g. "bitcoin" → Bitcoin)
+    for c in coins:
+        if (c.get("name") or "").lower() == q:
+            return c
+    # Exact symbol match, but prefer ranked coins to avoid meme token hijacking
+    sym_matches = [c for c in coins if (c.get("symbol") or "").lower() == q]
+    ranked = [c for c in sym_matches if c.get("market_cap_rank")]
+    if ranked:
+        return min(ranked, key=lambda c: c["market_cap_rank"])
+    if sym_matches:
+        return sym_matches[0]
+    return None
+
+
+async def _show_price(update: Update, coin_id: str, query: str):
+    data = await coingecko.get_price(coin_id)
+    if data:
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📈 Chart 7d", callback_data=f"chart:{coin_id}:7"),
+                InlineKeyboardButton("📊 Chart 30d", callback_data=f"chart:{coin_id}:30"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
+                InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
+            ],
+        ])
+        logo_url = _hd_logo_url(data)
+        caption = fmt.cex_price_message(data)
+        if logo_url:
+            await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
+        else:
+            await _safe_reply(update, caption, reply_markup=kb)
+        return True
+    return False
+
+
 async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
         await _safe_reply(update, "Usage: /price &lt;token&gt;\nExample: /price bitcoin")
@@ -98,25 +138,39 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Try CoinGecko first
     coins = await coingecko.search_coins(query)
     if coins:
-        coin_id = coins[0]["id"]
-        data = await coingecko.get_price(coin_id)
-        if data:
-            kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📈 Chart 7d", callback_data=f"chart:{coin_id}:7"),
-                    InlineKeyboardButton("📊 Chart 30d", callback_data=f"chart:{coin_id}:30"),
-                ],
-                [
-                    InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
-                    InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
-                ],
-            ])
-            logo_url = _hd_logo_url(data)
-            caption = fmt.cex_price_message(data)
-            if logo_url:
-                await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
-            else:
-                await _safe_reply(update, caption, reply_markup=kb)
+        # Check for exact symbol/name match first
+        best = _best_coin(coins, query)
+        if best:
+            if await _show_price(update, best["id"], query):
+                return
+        elif len(coins) == 1:
+            if await _show_price(update, coins[0]["id"], query):
+                return
+        else:
+            # Multiple ambiguous results — show selection buttons
+            buttons = []
+            seen = set()
+            for c in coins[:8]:
+                cid = c["id"]
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                name = c.get("name", cid)
+                sym = (c.get("symbol") or "").upper()
+                rank = c.get("market_cap_rank")
+                label = f"{name} ({sym})"
+                if rank:
+                    label += f" #{rank}"
+                buttons.append(
+                    [InlineKeyboardButton(label, callback_data=f"price_cb:{cid}")]
+                )
+            kb = InlineKeyboardMarkup(buttons)
+            await _safe_reply(
+                update,
+                f"Multiple tokens found for <b>{query}</b>.\n"
+                "Pick the one you want:",
+                reply_markup=kb,
+            )
             return
 
     # Fallback: try DexScreener
