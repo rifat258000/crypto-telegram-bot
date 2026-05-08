@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import time
 import traceback
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
-from bot import coingecko, dexscreener, charts, fmt
+from bot import coingecko, dexscreener, charts, fmt, calc, wallet
 
 log = logging.getLogger(__name__)
 
@@ -19,15 +21,22 @@ log = logging.getLogger(__name__)
 HELP_TEXT = (
     "<b>Crypto Market Bot</b>\n\n"
     "<b>Commands:</b>\n"
-    "/price &lt;token&gt; — Live price (CEX + DEX)\n"
-    "/chart &lt;token&gt; [1|7|30|90|365] — Price chart\n"
-    "/info &lt;token&gt; — Detailed token info\n"
-    "/trending — Trending tokens\n"
+    "/price (/p) &lt;token&gt; — Live price (CEX + DEX)\n"
+    "/chart (/c) &lt;token&gt; [1|7|30|90|365] — Price chart\n"
+    "/info (/i) &lt;token&gt; — Detailed token info\n"
+    "/trending (/t) — Trending tokens\n"
     "/top — Top 20 coins by market cap\n"
-    "/dex &lt;query&gt; — Search DEX pairs\n"
-    "/search &lt;query&gt; — Search all tokens\n"
+    "/dex (/d) &lt;query&gt; — Search DEX pairs\n"
+    "/search (/s) &lt;query&gt; — Search all tokens\n"
     "/help — Show this message\n\n"
-    "<i>You can also just send a token name or contract address directly!</i>"
+    "<b>No command needed:</b>\n"
+    "• <code>50 btc</code> — Total price of 50 BTC\n"
+    "• <code>23+23</code> — Calculator\n"
+    "• Paste wallet address — Multi-chain balances\n"
+    "• Type any token name — Quick price\n\n"
+    "<b>Works in groups!</b>\n"
+    "<i>@mention me for price/token lookup.\n"
+    "Calculator &amp; crypto qty work without mention (if admin).</i>"
 )
 
 
@@ -37,6 +46,42 @@ async def _safe_reply(update: Update, text: str, **kw):
         await msg.reply_text(text, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
 
 
+def _hd_logo_url(data: dict) -> str:
+    """Extract the highest resolution logo URL available."""
+    images = data.get("image") or {}
+    large_url = images.get("large") or ""
+    if large_url:
+        return large_url.replace("/large/", "/original/")
+    return ""
+
+
+def _dex_hd_logo_url(pair: dict) -> str:
+    """Extract HD logo URL from DexScreener pair data."""
+    info = pair.get("info") or {}
+    url = info.get("imageUrl") or ""
+    if url and "width=" in url:
+        # Remove size constraints for full resolution
+        base = url.split("?")[0]
+        return base
+    return url
+
+
+async def _safe_reply_photo(update: Update, photo_url: str, caption: str, **kw):
+    """Send a photo with caption. Falls back to text if photo fails."""
+    msg = update.message or (update.callback_query and update.callback_query.message)
+    if not msg:
+        return
+    try:
+        await msg.reply_photo(
+            photo=photo_url,
+            caption=caption,
+            parse_mode=ParseMode.HTML,
+            **kw,
+        )
+    except Exception:
+        await msg.reply_text(caption, parse_mode=ParseMode.HTML, disable_web_page_preview=True, **kw)
+
+
 # ── /start & /help ──────────────────────────────────────────────────────
 
 async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -44,6 +89,46 @@ async def start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ── /price ──────────────────────────────────────────────────────────────
+
+
+def _best_coin(coins: list[dict], query: str) -> dict | None:
+    q = query.lower().strip()
+    # Exact name match is strongest (e.g. "bitcoin" → Bitcoin)
+    for c in coins:
+        if (c.get("name") or "").lower() == q:
+            return c
+    # Exact symbol match, but prefer ranked coins to avoid meme token hijacking
+    sym_matches = [c for c in coins if (c.get("symbol") or "").lower() == q]
+    ranked = [c for c in sym_matches if c.get("market_cap_rank")]
+    if ranked:
+        return min(ranked, key=lambda c: c["market_cap_rank"])
+    if sym_matches:
+        return sym_matches[0]
+    return None
+
+
+async def _show_price(update: Update, coin_id: str, query: str):
+    data = await coingecko.get_price(coin_id)
+    if data:
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("📈 Chart 7d", callback_data=f"chart:{coin_id}:7"),
+                InlineKeyboardButton("📊 Chart 30d", callback_data=f"chart:{coin_id}:30"),
+            ],
+            [
+                InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
+                InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query[:53]}"),
+            ],
+        ])
+        logo_url = _hd_logo_url(data)
+        caption = fmt.cex_price_message(data)
+        if logo_url:
+            await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
+        else:
+            await _safe_reply(update, caption, reply_markup=kb)
+        return True
+    return False
+
 
 async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ctx.args:
@@ -55,20 +140,39 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # Try CoinGecko first
     coins = await coingecko.search_coins(query)
     if coins:
-        coin_id = coins[0]["id"]
-        data = await coingecko.get_price(coin_id)
-        if data:
-            kb = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("📈 Chart 7d", callback_data=f"chart:{coin_id}:7"),
-                    InlineKeyboardButton("📊 Chart 30d", callback_data=f"chart:{coin_id}:30"),
-                ],
-                [
-                    InlineKeyboardButton("ℹ️ Full Info", callback_data=f"info:{coin_id}"),
-                    InlineKeyboardButton("🔍 DEX Pairs", callback_data=f"dex_search:{query}"),
-                ],
-            ])
-            await _safe_reply(update, fmt.cex_price_message(data), reply_markup=kb)
+        # Check for exact symbol/name match first
+        best = _best_coin(coins, query)
+        if best:
+            if await _show_price(update, best["id"], query):
+                return
+        elif len(coins) == 1:
+            if await _show_price(update, coins[0]["id"], query):
+                return
+        else:
+            # Multiple ambiguous results — show selection buttons
+            buttons = []
+            seen = set()
+            for c in coins[:8]:
+                cid = c["id"]
+                if cid in seen:
+                    continue
+                seen.add(cid)
+                name = c.get("name", cid)
+                sym = (c.get("symbol") or "").upper()
+                rank = c.get("market_cap_rank")
+                label = f"{name} ({sym})"
+                if rank:
+                    label += f" #{rank}"
+                buttons.append(
+                    [InlineKeyboardButton(label, callback_data=f"price_cb:{cid}")]
+                )
+            kb = InlineKeyboardMarkup(buttons)
+            await _safe_reply(
+                update,
+                f"Multiple tokens found for <b>{query}</b>.\n"
+                "Pick the one you want:",
+                reply_markup=kb,
+            )
             return
 
     # Fallback: try DexScreener
@@ -76,7 +180,12 @@ async def price_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if pairs:
         pair = pairs[0]
         kb = _dex_pair_keyboard(pairs)
-        await _safe_reply(update, fmt.dex_pair_message(pair), reply_markup=kb)
+        logo_url = _dex_hd_logo_url(pair)
+        caption = fmt.dex_pair_message(pair)
+        if logo_url:
+            await _safe_reply_photo(update, logo_url, caption, reply_markup=kb)
+        else:
+            await _safe_reply(update, caption, reply_markup=kb)
         return
 
     await _safe_reply(update, f"No results found for <b>{query}</b>.")
@@ -286,7 +395,7 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📈 Chart", callback_data=f"chart:{cid}:7"),
         ])
     if dex_pairs:
-        buttons.append([InlineKeyboardButton("🔍 DEX Details", callback_data=f"dex_search:{query}")])
+        buttons.append([InlineKeyboardButton("🔍 DEX Details", callback_data=f"dex_search:{query[:53]}")])
 
     kb = InlineKeyboardMarkup(buttons) if buttons else None
     await _safe_reply(update, "\n".join(lines), reply_markup=kb)
@@ -294,10 +403,112 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 # ── plain text handler (search by name or address) ──────────────────────
 
+BOT_USERNAME: str | None = None
+BOT_ID: int | None = None
+_admin_cache: dict[int, tuple[bool, float]] = {}
+_ADMIN_CACHE_TTL = 300  # 5 minutes
+
+
+async def _bot_is_admin(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
+    global BOT_ID
+    now = time.monotonic()
+    cached = _admin_cache.get(chat_id)
+    if cached and now - cached[1] < _ADMIN_CACHE_TTL:
+        return cached[0]
+    try:
+        if BOT_ID is None:
+            bot_info = await ctx.bot.get_me()
+            BOT_ID = bot_info.id
+        member = await ctx.bot.get_chat_member(chat_id, BOT_ID)
+        result = member.status in ("administrator", "creator")
+        _admin_cache[chat_id] = (result, now)
+        return result
+    except Exception:
+        _admin_cache[chat_id] = (False, now)
+        return False
+
+
 async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    global BOT_USERNAME
     text = (update.message.text or "").strip()
     if not text or text.startswith("/"):
         return
+
+    # In group chats: @mention required for price/token lookup.
+    # Math calc & crypto qty work without mention (if bot is admin).
+    chat_type = update.effective_chat.type if update.effective_chat else "private"
+    is_group = chat_type in ("group", "supergroup")
+    mentioned = False
+    if is_group:
+        if BOT_USERNAME is None:
+            bot_info = await ctx.bot.get_me()
+            BOT_USERNAME = bot_info.username or ""
+        mention = f"@{BOT_USERNAME}"
+        has_mention = mention.lower() in text.lower()
+
+        if has_mention:
+            mentioned = True
+            text = re.sub(re.escape(mention), "", text, flags=re.IGNORECASE).strip()
+            if not text:
+                await _safe_reply(update, HELP_TEXT)
+                return
+        else:
+            # Not mentioned — only allow math/crypto-qty if bot is admin
+            is_admin = await _bot_is_admin(update.effective_chat.id, ctx)
+            if not is_admin:
+                return
+
+    # 1) Math calculator: 23+23, 100/5, etc. (works without mention in groups)
+    math_result = calc.try_math(text)
+    if math_result:
+        await _safe_reply(update, math_result)
+        return
+
+    # 2) Crypto quantity: "50 btc", "2 eth" (works without mention in groups)
+    parsed = calc.parse_crypto_qty(text)
+    if parsed:
+        qty, symbol = parsed
+        coins = await coingecko.search_coins(symbol)
+        if coins:
+            best = _best_coin(coins, symbol)
+            coin_id = best["id"] if best else coins[0]["id"]
+            data = await coingecko.get_price(coin_id)
+            if data:
+                md = data.get("market_data") or {}
+                price = (md.get("current_price") or {}).get("usd")
+                if price:
+                    total = price * qty
+                    name = data.get("name", symbol.upper())
+                    sym = (data.get("symbol") or symbol).upper()
+                    logo_url = _hd_logo_url(data)
+                    bdt_rate = 125
+                    total_bdt = total * bdt_rate
+                    msg = (
+                        f"<b>{qty:,.6g} {sym}</b>\n\n"
+                        f"💰 Price: <b>{fmt.fmt_price(price)}</b>\n"
+                        f"💵 Total: <b>${total:,.2f}</b>\n"
+                        f"🇧🇩 BDT: <b>৳{total_bdt:,.2f}</b>"
+                    )
+                    if logo_url:
+                        await _safe_reply_photo(update, logo_url, msg)
+                    else:
+                        await _safe_reply(update, msg)
+                    return
+
+    # In groups without @mention, stop here — no token/wallet/price lookup
+    if is_group and not mentioned:
+        return
+
+    # 3) Wallet address: show multi-chain balances (requires @mention in groups)
+    clean = text.split()[0] if text.split() else text
+    if wallet.detect_address_type(clean):
+        await _safe_reply(update, "Looking up wallet balances...")
+        result = await wallet.get_wallet_balances(clean)
+        if result:
+            await _safe_reply(update, result)
+            return
+
+    # 4) Default: search token by name (requires @mention in groups)
     ctx.args = text.split()
     await price_cmd(update, ctx)
 
@@ -314,7 +525,17 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             coin_id = data.split(":", 1)[1]
             d = await coingecko.get_price(coin_id)
             if d:
-                await q.message.reply_text(fmt.cex_price_message(d), parse_mode=ParseMode.HTML)
+                logo_url = _hd_logo_url(d)
+                caption = fmt.cex_price_message(d)
+                if logo_url:
+                    try:
+                        await q.message.reply_photo(
+                            photo=logo_url, caption=caption, parse_mode=ParseMode.HTML
+                        )
+                    except Exception:
+                        await q.message.reply_text(caption, parse_mode=ParseMode.HTML)
+                else:
+                    await q.message.reply_text(caption, parse_mode=ParseMode.HTML)
             else:
                 await q.message.reply_text("Could not fetch price.")
 
@@ -386,6 +607,18 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled exception: %s", ctx.error, exc_info=ctx.error)
+    if isinstance(update, Update) and update.effective_message:
+        # In groups, don't send error messages for plain text (non-command)
+        chat_type = update.effective_chat.type if update.effective_chat else "private"
+        msg_text = update.effective_message.text or ""
+        if chat_type in ("group", "supergroup") and not msg_text.startswith("/"):
+            return
+        try:
+            await update.effective_message.reply_text(
+                "Temporary error — please try again in a moment."
+            )
+        except Exception:
+            pass
 
 
 # ── keyboard helpers ────────────────────────────────────────────────────
