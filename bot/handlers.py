@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import logging
 import re
+import time
 import traceback
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -404,17 +405,26 @@ async def search_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 BOT_USERNAME: str | None = None
 BOT_ID: int | None = None
+_admin_cache: dict[int, tuple[bool, float]] = {}
+_ADMIN_CACHE_TTL = 300  # 5 minutes
 
 
 async def _bot_is_admin(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE) -> bool:
     global BOT_ID
+    now = time.monotonic()
+    cached = _admin_cache.get(chat_id)
+    if cached and now - cached[1] < _ADMIN_CACHE_TTL:
+        return cached[0]
     try:
         if BOT_ID is None:
             bot_info = await ctx.bot.get_me()
             BOT_ID = bot_info.id
         member = await ctx.bot.get_chat_member(chat_id, BOT_ID)
-        return member.status in ("administrator", "creator")
+        result = member.status in ("administrator", "creator")
+        _admin_cache[chat_id] = (result, now)
+        return result
     except Exception:
+        _admin_cache[chat_id] = (False, now)
         return False
 
 
@@ -598,6 +608,11 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, ctx: ContextTypes.DEFAULT_TYPE):
     log.error("Unhandled exception: %s", ctx.error, exc_info=ctx.error)
     if isinstance(update, Update) and update.effective_message:
+        # In groups, don't send error messages for plain text (non-command)
+        chat_type = update.effective_chat.type if update.effective_chat else "private"
+        msg_text = update.effective_message.text or ""
+        if chat_type in ("group", "supergroup") and not msg_text.startswith("/"):
+            return
         try:
             await update.effective_message.reply_text(
                 "Temporary error — please try again in a moment."
